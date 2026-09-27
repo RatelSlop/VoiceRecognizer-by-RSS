@@ -1,0 +1,14 @@
+{
+  "keywords": {
+    "kanker": "kanker.mp3",
+    "hoi": "ploep.mp3",
+    "kaas": "ploep.mp3",
+    "bro": "ploep.mp3"
+  },
+  "default_sound": "ploep.mp3",
+  "target_user_ids": [],
+  "cooldown_seconds": 1.5,
+  "volume": 0.85,
+  "stt_engine": "google",
+  "notify_in_chat": true
+}

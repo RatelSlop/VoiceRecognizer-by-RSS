@@ -1,0 +1,25 @@
+# Secrets and environment
+.env
+*.env
+*.env.local
+
+# Logs
+*.log
+bot.log
+
+# Temporary test scripts
+test_asr.py
+
+# Python cache & virtualenvs
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
