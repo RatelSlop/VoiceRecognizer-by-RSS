@@ -10,6 +10,7 @@ import json
 import time
 import logging
 import asyncio
+import threading
 import re
 from typing import Dict, Any, List, Optional
 
@@ -107,36 +108,61 @@ DEFAULT_CONFIG = {
     "notify_in_chat": True
 }
 
+config_lock = threading.RLock()
+_last_config_mtime = 0.0
+
 def load_config() -> Dict[str, Any]:
-    if not os.path.exists(CONFIG_FILE):
-        save_config(DEFAULT_CONFIG)
-        return DEFAULT_CONFIG.copy()
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            # Voeg ontbrekende default keys toe
-            for k, v in DEFAULT_CONFIG.items():
-                if k not in data:
-                    data[k] = v
-            return data
-    except Exception as e:
-        logger.error(f"Fout bij lezen van {CONFIG_FILE}: {e}")
-        return DEFAULT_CONFIG.copy()
+    global _last_config_mtime
+    with config_lock:
+        if not os.path.exists(CONFIG_FILE):
+            save_config(DEFAULT_CONFIG)
+            return DEFAULT_CONFIG.copy()
+        try:
+            mtime = os.path.getmtime(CONFIG_FILE)
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for k, v in DEFAULT_CONFIG.items():
+                    if k not in data:
+                        data[k] = v
+                _last_config_mtime = mtime
+                return data
+        except Exception as e:
+            logger.error(f"Fout bij lezen van {CONFIG_FILE}: {e}")
+            if "config" in globals() and config:
+                return config
+            return DEFAULT_CONFIG.copy()
 
 def save_config(cfg: Dict[str, Any]) -> None:
-    global config
-    config = cfg
-    try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        logger.error(f"Fout bij opslaan van {CONFIG_FILE}: {e}")
+    global config, _last_config_mtime
+    with config_lock:
+        config = cfg
+        temp_file = CONFIG_FILE + ".tmp"
+        try:
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_file, CONFIG_FILE)
+            _last_config_mtime = os.path.getmtime(CONFIG_FILE)
+        except Exception as e:
+            logger.error(f"Fout bij opslaan van {CONFIG_FILE}: {e}")
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except Exception:
+                    pass
 
 config = load_config()
 
 def get_current_config() -> Dict[str, Any]:
-    global config
-    config = load_config()
+    global config, _last_config_mtime
+    try:
+        if os.path.exists(CONFIG_FILE):
+            mtime = os.path.getmtime(CONFIG_FILE)
+            if mtime != _last_config_mtime:
+                config = load_config()
+    except Exception:
+        pass
     return config
 
 def get_available_sounds() -> List[str]:
@@ -248,7 +274,7 @@ async def sound_autocomplete(
 ) -> List[app_commands.Choice[str]]:
     sounds = get_available_sounds()
     return [
-        app_commands.Choice(name=s, value=s)
+        app_commands.Choice(name=s[:100], value=s)
         for s in sounds if current.lower() in s.lower()
     ][:25]
 
@@ -259,7 +285,7 @@ async def keyword_autocomplete(
 ) -> List[app_commands.Choice[str]]:
     kws = list(config.get("keywords", {}).keys())
     return [
-        app_commands.Choice(name=k, value=k)
+        app_commands.Choice(name=k[:100], value=k)
         for k in kws if current.lower() in k.lower()
     ][:25]
 
@@ -452,19 +478,21 @@ keyword_group = app_commands.Group(name="keyword", description="Beheer de trefwo
 @keyword_group.command(name="add", description="Voeg een nieuw trefwoord toe met een geluid of upload direct een mp3.")
 @app_commands.describe(
     woord="Het woord waarop de bot moet reageren (bijv. 'kanker', 'bro', 'kut')",
-    geluid="Kies een bestaand geluid uit de lijst (optioneel)",
-    bestand="Upload direct een nieuw geluidsbestand (.mp3, .wav, etc.) (optioneel)"
+    bestand="Upload direct een nieuw geluidsbestand (.mp3, .wav, etc.) (optioneel)",
+    geluid="Of kies een bestaand geluid uit de lijst (optioneel)"
 )
 @app_commands.autocomplete(geluid=sound_autocomplete)
 async def cmd_keyword_add(
     interaction: discord.Interaction,
     woord: str,
-    geluid: Optional[str] = None,
-    bestand: Optional[discord.Attachment] = None
+    bestand: Optional[discord.Attachment] = None,
+    geluid: Optional[str] = None
 ):
+    await interaction.response.defer(ephemeral=False)
+
     clean_word = woord.strip().lower()
     if not clean_word:
-        await interaction.response.send_message("❌ Ongeldig woord opgegeven.", ephemeral=True)
+        await interaction.followup.send("❌ Ongeldig woord opgegeven.")
         return
 
     valid_exts = (".mp3", ".wav", ".ogg", ".m4a", ".flac")
@@ -474,14 +502,13 @@ async def cmd_keyword_add(
     if bestand:
         ext = os.path.splitext(bestand.filename)[1].lower()
         if ext not in valid_exts:
-            await interaction.response.send_message(
-                f"❌ Ongeldig bestandstype (`{ext}`). Alleen {', '.join(valid_exts)} zijn toegestaan!",
-                ephemeral=True
+            await interaction.followup.send(
+                f"❌ Ongeldig bestandstype (`{ext}`). Alleen {', '.join(valid_exts)} zijn toegestaan!"
             )
             return
 
         if bestand.size > 15 * 1024 * 1024:
-            await interaction.response.send_message("❌ Het audiobestand is te groot (max 15MB)!", ephemeral=True)
+            await interaction.followup.send("❌ Het audiobestand is te groot (max 15MB)!")
             return
 
         base_name = os.path.splitext(bestand.filename)[0]
@@ -494,16 +521,16 @@ async def cmd_keyword_add(
             chosen_sound = filename
             logger.info(f"Nieuw audiobestand geüpload via /keyword add: {dest_path}")
         except Exception as e:
-            await interaction.response.send_message(f"❌ Fout bij opslaan van bestand: {e}", ephemeral=True)
+            logger.error(f"Fout bij opslaan van bestand: {e}")
+            await interaction.followup.send(f"❌ Fout bij opslaan van bestand: {e}")
             return
 
     # Optie 2: Er is een bestaand geluid gekozen
     elif geluid:
         sounds = get_available_sounds()
         if geluid not in sounds:
-            await interaction.response.send_message(
-                f"⚠️ Geluid `{geluid}` niet gevonden in `sounds/`. Beschikbare geluiden: {', '.join(sounds) or 'Geen'}",
-                ephemeral=True
+            await interaction.followup.send(
+                f"⚠️ Geluid `{geluid}` niet gevonden in `sounds/`. Beschikbare geluiden: {', '.join(sounds) or 'Geen'}"
             )
             return
         chosen_sound = geluid
@@ -525,20 +552,21 @@ async def cmd_keyword_add(
     else:
         embed.add_field(name="Gekoppeld Geluid", value=f"`{chosen_sound}`", inline=False)
 
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 
 @keyword_group.command(name="remove", description="Verwijder een bestaand trefwoord.")
 @app_commands.describe(woord="Het woord dat verwijderd moet worden")
 @app_commands.autocomplete(woord=keyword_autocomplete)
 async def cmd_keyword_remove(interaction: discord.Interaction, woord: str):
+    await interaction.response.defer(ephemeral=False)
     clean_word = woord.strip().lower()
     if clean_word in config.get("keywords", {}):
         del config["keywords"][clean_word]
         save_config(config)
-        await interaction.response.send_message(f"🗑️ Trefwoord **'{clean_word}'** is verwijderd!", ephemeral=False)
+        await interaction.followup.send(f"🗑️ Trefwoord **'{clean_word}'** is verwijderd!")
     else:
-        await interaction.response.send_message(f"❌ Trefwoord **'{clean_word}'** staat niet in de lijst.", ephemeral=True)
+        await interaction.followup.send(f"❌ Trefwoord **'{clean_word}'** staat niet in de lijst.")
 
 
 @keyword_group.command(name="list", description="Bekijk alle actieve trefwoorden en hun geluiden.")
@@ -649,17 +677,17 @@ async def cmd_sounds(interaction: discord.Interaction):
 @bot.tree.command(name="upload_sound", description="Upload een nieuw geluidsbestand (.mp3, .wav) naar de bot.")
 @app_commands.describe(bestand="Het audiobestand dat je wilt uploaden (.mp3, .wav, etc.)")
 async def cmd_upload_sound(interaction: discord.Interaction, bestand: discord.Attachment):
+    await interaction.response.defer(ephemeral=False)
     valid_exts = (".mp3", ".wav", ".ogg", ".m4a", ".flac")
     ext = os.path.splitext(bestand.filename)[1].lower()
     if ext not in valid_exts:
-        await interaction.response.send_message(
-            f"❌ Ongeldig bestandstype (`{ext}`). Alleen {', '.join(valid_exts)} zijn toegestaan!",
-            ephemeral=True
+        await interaction.followup.send(
+            f"❌ Ongeldig bestandstype (`{ext}`). Alleen {', '.join(valid_exts)} zijn toegestaan!"
         )
         return
 
     if bestand.size > 15 * 1024 * 1024:
-        await interaction.response.send_message("❌ Het audiobestand is te groot (max 15MB)!", ephemeral=True)
+        await interaction.followup.send("❌ Het audiobestand is te groot (max 15MB)!")
         return
 
     base_name = os.path.splitext(bestand.filename)[0]
@@ -677,9 +705,10 @@ async def cmd_upload_sound(interaction: discord.Interaction, bestand: discord.At
         )
         embed.add_field(name="Bestandsnaam", value=f"`{filename}`", inline=True)
         embed.add_field(name="Grootte", value=f"`{bestand.size // 1024} KB`", inline=True)
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
     except Exception as e:
-        await interaction.response.send_message(f"❌ Fout bij opslaan van bestand: {e}", ephemeral=True)
+        logger.error(f"Fout bij opslaan van bestand: {e}")
+        await interaction.followup.send(f"❌ Fout bij opslaan van bestand: {e}")
 
 
 # -------------------------------------------------------------
@@ -745,6 +774,20 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
             sink.cleanup()
         active_text_channels.pop(guild_id, None)
         logger.info(f"Bot ontkoppeld van spraakkanaal in {member.guild.name}.")
+
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Vangt onverwerkte fouten in slash commando's op en informeert de gebruiker."""
+    logger.error(f"Fout in slash commando: {error}", exc_info=error)
+    msg = "⚠️ Er is een fout opgetreden bij het uitvoeren van dit commando."
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except Exception:
+        pass
 
 
 @bot.event
