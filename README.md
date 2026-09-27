@@ -1,6 +1,6 @@
 # 🎙️ VoiceRecognizer by RSS
 
-Een geavanceerde, modulaire Discord voice bot die meeluistert in spraakkanalen en automatisch een geluidje (sound effect) afspeelt zodra iemand (of specifiek je vriend) een bepaald trefwoord zegt (standaard ingesteld op **"kanker"** en **"ploep"** voor overige woorden).
+Een geavanceerde, modulaire Discord voice bot die meeluistert in spraakkanalen en automatisch een geluidje (sound effect) afspeelt zodra iemand (of specifiek je vriend) een bepaald trefwoord zegt 
 
 ---
 
