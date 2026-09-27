@@ -14,9 +14,9 @@ Een geavanceerde, modulaire Discord voice bot die meeluistert in spraakkanalen e
 - **🎙️ Geavanceerde VAD & AGC**: Automatische versterking van zachte microfoons (Automatic Gain Control) en slimme pauzedetectie zodat woorden nooit half worden afgekapt.
 - **🎯 Vriend-Targeting**: Laat de bot reageren op **iedereen** in de call, of stel specifiek je vriend in via `/target set @vriend` zodat de bot alleen bij hem afgaat!
 - **➕ Flexibele Trefwoorden**: Voeg op elk gewenst moment nieuwe trefwoorden toe via Discord commando's (`/keyword add ...`) of via `config.json`.
-- **🔊 Aparte Geluiden per Trefwoord**: Koppel verschillende trefwoorden aan verschillende geluiden (bijv. `"kanker"` ➔ `kanker.mp3`, `"hoi"` ➔ `ploep.mp3`).
+- **🔊 Aparte Geluiden per Trefwoord**: Koppel verschillende trefwoorden aan verschillende geluiden (bijv. `"hoi"` ➔ `ploep.mp3`).
 - **🎵 Eenvoudig Eigen Geluiden Toevoegen**: Plaats simpelweg jouw eigen `.mp3` of `.wav` bestanden in de map `sounds/`.
-- **🖥️ Cross-Platform & Pterodactyl Ready**: Draait soepel op zowel Windows als Linux / Pterodactyl servers.
+- **🖥️ Cross-Platform & Pterodactyl Ready**: Draait soepel op zowel Windows als Linux.
 
 ---
 
@@ -76,7 +76,6 @@ python bot.py
 ```json
 {
   "keywords": {
-    "kanker": "kanker.mp3",
     "hoi": "ploep.mp3",
     "kaas": "ploep.mp3",
     "bro": "ploep.mp3"
