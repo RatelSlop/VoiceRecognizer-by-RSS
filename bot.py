@@ -10,6 +10,7 @@ import json
 import time
 import logging
 import asyncio
+import re
 from typing import Dict, Any, List, Optional
 
 import discord
@@ -448,26 +449,68 @@ async def cmd_debug(interaction: discord.Interaction):
 # -------------------------------------------------------------
 keyword_group = app_commands.Group(name="keyword", description="Beheer de trefwoorden en gekoppelde geluiden")
 
-@keyword_group.command(name="add", description="Voeg een nieuw trefwoord toe met optioneel een eigen geluid.")
+@keyword_group.command(name="add", description="Voeg een nieuw trefwoord toe met een geluid of upload direct een mp3.")
 @app_commands.describe(
     woord="Het woord waarop de bot moet reageren (bijv. 'kanker', 'bro', 'kut')",
-    geluid="Kies het geluid dat moet worden afgespeeld (optioneel)"
+    geluid="Kies een bestaand geluid uit de lijst (optioneel)",
+    bestand="Upload direct een nieuw geluidsbestand (.mp3, .wav, etc.) (optioneel)"
 )
 @app_commands.autocomplete(geluid=sound_autocomplete)
-async def cmd_keyword_add(interaction: discord.Interaction, woord: str, geluid: Optional[str] = None):
+async def cmd_keyword_add(
+    interaction: discord.Interaction,
+    woord: str,
+    geluid: Optional[str] = None,
+    bestand: Optional[discord.Attachment] = None
+):
     clean_word = woord.strip().lower()
     if not clean_word:
         await interaction.response.send_message("❌ Ongeldig woord opgegeven.", ephemeral=True)
         return
 
-    chosen_sound = geluid if geluid else config.get("default_sound", "buzzer.wav")
-    sounds = get_available_sounds()
-    if chosen_sound not in sounds:
-        await interaction.response.send_message(
-            f"⚠️ Geluid `{chosen_sound}` niet gevonden in `sounds/`. Beschikbare geluiden: {', '.join(sounds) or 'Geen'}",
-            ephemeral=True
-        )
-        return
+    valid_exts = (".mp3", ".wav", ".ogg", ".m4a", ".flac")
+    chosen_sound = None
+
+    # Optie 1: Er is direct een audiobestand meegestuurd
+    if bestand:
+        ext = os.path.splitext(bestand.filename)[1].lower()
+        if ext not in valid_exts:
+            await interaction.response.send_message(
+                f"❌ Ongeldig bestandstype (`{ext}`). Alleen {', '.join(valid_exts)} zijn toegestaan!",
+                ephemeral=True
+            )
+            return
+
+        if bestand.size > 15 * 1024 * 1024:
+            await interaction.response.send_message("❌ Het audiobestand is te groot (max 15MB)!", ephemeral=True)
+            return
+
+        base_name = os.path.splitext(bestand.filename)[0]
+        safe_base = re.sub(r'[^a-zA-Z0-9_\-]', '_', base_name).strip('_') or f"sound_{clean_word}"
+        filename = f"{safe_base}{ext}"
+        dest_path = os.path.join(SOUNDS_DIR, filename)
+
+        try:
+            await bestand.save(dest_path)
+            chosen_sound = filename
+            logger.info(f"Nieuw audiobestand geüpload via /keyword add: {dest_path}")
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Fout bij opslaan van bestand: {e}", ephemeral=True)
+            return
+
+    # Optie 2: Er is een bestaand geluid gekozen
+    elif geluid:
+        sounds = get_available_sounds()
+        if geluid not in sounds:
+            await interaction.response.send_message(
+                f"⚠️ Geluid `{geluid}` niet gevonden in `sounds/`. Beschikbare geluiden: {', '.join(sounds) or 'Geen'}",
+                ephemeral=True
+            )
+            return
+        chosen_sound = geluid
+
+    # Optie 3: Standaard geluid
+    else:
+        chosen_sound = config.get("default_sound", "ploep.mp3")
 
     config["keywords"][clean_word] = chosen_sound
     save_config(config)
@@ -477,6 +520,11 @@ async def cmd_keyword_add(interaction: discord.Interaction, woord: str, geluid: 
         description=f"Als iemand **'{clean_word}'** zegt, speelt de bot `{chosen_sound}` af.",
         color=discord.Color.green()
     )
+    if bestand:
+        embed.add_field(name="Nieuw Geluid Geüpload", value=f"`{chosen_sound}` ({bestand.size // 1024} KB)", inline=False)
+    else:
+        embed.add_field(name="Gekoppeld Geluid", value=f"`{chosen_sound}`", inline=False)
+
     await interaction.response.send_message(embed=embed)
 
 
@@ -596,6 +644,42 @@ async def cmd_sounds(interaction: discord.Interaction):
     )
     embed.set_footer(text=f"Plaats eigen .mp3 of .wav bestanden in de 'sounds/' map!")
     await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="upload_sound", description="Upload een nieuw geluidsbestand (.mp3, .wav) naar de bot.")
+@app_commands.describe(bestand="Het audiobestand dat je wilt uploaden (.mp3, .wav, etc.)")
+async def cmd_upload_sound(interaction: discord.Interaction, bestand: discord.Attachment):
+    valid_exts = (".mp3", ".wav", ".ogg", ".m4a", ".flac")
+    ext = os.path.splitext(bestand.filename)[1].lower()
+    if ext not in valid_exts:
+        await interaction.response.send_message(
+            f"❌ Ongeldig bestandstype (`{ext}`). Alleen {', '.join(valid_exts)} zijn toegestaan!",
+            ephemeral=True
+        )
+        return
+
+    if bestand.size > 15 * 1024 * 1024:
+        await interaction.response.send_message("❌ Het audiobestand is te groot (max 15MB)!", ephemeral=True)
+        return
+
+    base_name = os.path.splitext(bestand.filename)[0]
+    safe_base = re.sub(r'[^a-zA-Z0-9_\-]', '_', base_name).strip('_') or "sound"
+    filename = f"{safe_base}{ext}"
+    dest_path = os.path.join(SOUNDS_DIR, filename)
+
+    try:
+        await bestand.save(dest_path)
+        logger.info(f"Nieuw audiobestand opgeslagen via /upload_sound: {dest_path}")
+        embed = discord.Embed(
+            title="🎵 Geluid Succesvol Geüpload!",
+            description=f"Bestand **`{filename}`** is opgeslagen in de sounds map!\nJe kunt dit geluid nu koppelen met `/keyword add` of uittesten met `/test_sound`.",
+            color=discord.Color.purple()
+        )
+        embed.add_field(name="Bestandsnaam", value=f"`{filename}`", inline=True)
+        embed.add_field(name="Grootte", value=f"`{bestand.size // 1024} KB`", inline=True)
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Fout bij opslaan van bestand: {e}", ephemeral=True)
 
 
 # -------------------------------------------------------------
