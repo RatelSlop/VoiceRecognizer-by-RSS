@@ -80,7 +80,7 @@ class KeywordAudioSink(voice_recv.AudioSink):
         self,
         bot: discord.Client,
         config: Dict[str, Any],
-        on_keyword_detected: Callable[[Any, str, str], None],
+        on_keyword_detected: Callable[..., None],
         get_config_func: Optional[Callable[[], Dict[str, Any]]] = None
     ):
         super().__init__()
@@ -370,7 +370,7 @@ class KeywordAudioSink(voice_recv.AudioSink):
                     self.last_trigger_time = now
                     self.last_detected_keyword = kw
                     logger.info(f"🚨 TREFWOORD GEDETECTEERD: '{kw}' door {speaker_name}! Speel: {sound}")
-                    self.on_keyword_detected(speaker_obj, kw, sound)
+                    self.on_keyword_detected(speaker_obj, kw, sound, clean_display)
 
     @voice_recv.AudioSink.listener()
     def on_voice_member_disconnect(self, member: discord.Member, ssrc: Optional[int]) -> None:

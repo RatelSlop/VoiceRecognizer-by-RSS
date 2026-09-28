@@ -4,7 +4,7 @@
     "hoi": "ploep.mp3",
     "kaas": "ploep.mp3",
     "neger": "ploep.mp3",
-    "kut": "ploep.mp3",
+    "kut": "metal-pipe-clang.mp3",
     "kankerneger": "fortnite-rage-quit_pS9uXYq.mp3",
     "fuck": "fortnite-rage-quit_pS9uXYq.mp3",
     "fak": "fortnite-rage-quit_pS9uXYq.mp3",
@@ -12,12 +12,22 @@
     "shit": "ploep.mp3",
     "bro": "ploep.mp3",
     "gast": "ploep.mp3",
-    "hans": "rene-le-blanc.mp3"
+    "hans": "rene-le-blanc.mp3",
+    "tering": "nuclear-diarrhea.mp3",
+    "spin": "spiderman-meme-song-2-0.mp3",
+    "kerst": "maar-allee-ik-word-gekilled-door-een-kerstboom.mp3",
+    "ijs": "bing-chilling_fcdGgUc.mp3",
+    "son": "lo-siento-wilson.mp3",
+    "auw": "ik-val-van-de-trap-af.mp3",
+    "zon": "lo-siento-wilson.mp3",
+    "ai": "homer-lets-the-barts-out.mp3"
   },
   "default_sound": "ploep.mp3",
   "target_user_ids": [],
   "cooldown_seconds": 1.5,
   "volume": 0.85,
   "stt_engine": "google",
-  "notify_in_chat": true
+  "notify_in_chat": true,
+  "tts_enabled": true,
+  "tts_mode": "sound_then_tts"
 }
