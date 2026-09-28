@@ -29,5 +29,6 @@
   "stt_engine": "google",
   "notify_in_chat": true,
   "tts_enabled": true,
-  "tts_mode": "sound_then_tts"
+  "tts_mode": "tts_then_sound",
+  "tts_inhoud": "keyword"
 }

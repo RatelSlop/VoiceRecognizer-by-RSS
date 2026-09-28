@@ -108,7 +108,8 @@ DEFAULT_CONFIG = {
     "stt_engine": "google",
     "notify_in_chat": True,
     "tts_enabled": True,
-    "tts_mode": "sound_then_tts"
+    "tts_mode": "sound_then_tts",
+    "tts_inhoud": "keyword"
 }
 
 config_lock = threading.RLock()
@@ -332,13 +333,18 @@ async def _handle_keyword_async(user: discord.User, keyword: str, sound_file: st
                 if os.path.exists(def_p):
                     sound_path = def_p
 
-        # Bepaal de zin die moet worden opgelezen
+        # Bepaal de tekst die door TTS moet worden opgelezen ("USER zei keyword")
         spoken_sentence = extract_keyword_sentence(sentence, keyword) if sentence else ""
+        tts_inhoud = cfg.get("tts_inhoud", "keyword")
+        if tts_inhoud == "sentence" and spoken_sentence:
+            tts_text = f"{user.display_name} zei: {spoken_sentence}"
+        else:
+            tts_text = f"{user.display_name} zei {keyword}"
 
         # Genereer eventueel TTS audiobestand in achtergrondthread
         tts_file = None
-        if tts_enabled and spoken_sentence:
-            tts_file = await asyncio.to_thread(generate_tts_file, spoken_sentence, "nl")
+        if tts_enabled and tts_text:
+            tts_file = await asyncio.to_thread(generate_tts_file, tts_text, "nl")
 
         try:
             if tts_mode == "only_tts":
@@ -381,8 +387,8 @@ async def _handle_keyword_async(user: discord.User, keyword: str, sound_file: st
                     embed.add_field(name="💬 Gehoorde Zin", value=f"*{spoken_sentence}*", inline=False)
                 if sound_file:
                     embed.add_field(name="🔊 Geluid", value=f"`{sound_file}`", inline=True)
-                if tts_enabled and spoken_sentence:
-                    embed.add_field(name="🗣️ TTS", value="Opgelesen", inline=True)
+                if tts_enabled and tts_text:
+                    embed.add_field(name="🗣️ TTS Opgelesen", value=f"*{tts_text}*", inline=True)
                 embed.set_footer(text="Keyword Voice Bot")
                 try:
                     await text_channel.send(embed=embed)
@@ -885,7 +891,8 @@ async def cmd_upload_sound(interaction: discord.Interaction, bestand: discord.At
     cooldown="Cooldown in seconden tussen geluiden (standaard 3.0)",
     notificaties="Stuur een chatbericht wanneer een trefwoord gehoord wordt",
     tts="Laat de bot de zin oplezen (TTS) waarin het trefwoord gezegd is",
-    tts_modus="Kies de afspeelvolgorde van het geluid en het oplezen"
+    tts_modus="Kies de afspeelvolgorde van het geluid en het oplezen",
+    tts_inhoud="Wat de bot zegt ('USER zei keyword' of 'USER zei hele zin')"
 )
 @app_commands.choices(engine=[
     app_commands.Choice(name="Whisper (OpenAI, beste accuratesse & ruisonderdrukking)", value="whisper"),
@@ -897,6 +904,10 @@ async def cmd_upload_sound(interaction: discord.Interaction, bestand: discord.At
     app_commands.Choice(name="Alleen zin oplezen (geen geluid)", value="only_tts"),
     app_commands.Choice(name="Eerst zin oplezen, daarna geluid", value="tts_then_sound")
 ])
+@app_commands.choices(tts_inhoud=[
+    app_commands.Choice(name="Alleen trefwoord ('USER zei keyword')", value="keyword"),
+    app_commands.Choice(name="Volledige zin ('USER zei hele zin')", value="sentence")
+])
 async def cmd_settings(
     interaction: discord.Interaction,
     engine: Optional[app_commands.Choice[str]] = None,
@@ -904,7 +915,8 @@ async def cmd_settings(
     cooldown: Optional[float] = None,
     notificaties: Optional[bool] = None,
     tts: Optional[bool] = None,
-    tts_modus: Optional[app_commands.Choice[str]] = None
+    tts_modus: Optional[app_commands.Choice[str]] = None,
+    tts_inhoud: Optional[app_commands.Choice[str]] = None
 ):
     changed = []
     if engine:
@@ -927,6 +939,9 @@ async def cmd_settings(
     if tts_modus:
         config["tts_mode"] = tts_modus.value
         changed.append(f"TTS Modus ➔ `{tts_modus.name}`")
+    if tts_inhoud:
+        config["tts_inhoud"] = tts_inhoud.value
+        changed.append(f"TTS Inhoud ➔ `{tts_inhoud.name}`")
 
     if changed:
         save_config(config)
