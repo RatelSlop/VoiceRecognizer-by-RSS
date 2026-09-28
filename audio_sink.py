@@ -190,47 +190,65 @@ class KeywordAudioSink(voice_recv.AudioSink):
         if not user_q.full():
             user_q.put_nowait(data.pcm)
 
-    def _check_text_for_keywords(self, text: str) -> Optional[Tuple[str, str]]:
+    def _find_all_keywords(self, text: str) -> List[Tuple[str, str]]:
+        """Vindt alle trefwoorden in de uitgesproken tekst in volgorde van voorkomen (ondersteunt stacking)."""
         if not text:
-            return None
+            return []
 
         clean_text = text.lower().strip()
-        # Verwijder leestekens van begin en eind van woorden
         raw_words = clean_text.split()
         words = [re.sub(r'^[^\w]+|[^\w]+$', '', w) for w in raw_words if w]
-        compact_text = "".join(words)
 
         cfg = self.get_config()
         keywords_dict: Dict[str, str] = cfg.get("keywords", {})
-        default_sound = cfg.get("default_sound", "buzzer.wav")
+        default_sound = cfg.get("default_sound", "ploep.mp3")
 
-        for kw, sound in keywords_dict.items():
-            kw_clean = kw.strip().lower()
-            if not kw_clean:
-                continue
+        # Sorteer op lengte (langste eerst, zodat bijv. 'kankerneger' voor 'kanker' gaat)
+        sorted_kws = sorted(keywords_dict.keys(), key=lambda k: len(k.strip()), reverse=True)
 
-            sound_to_play = sound if sound else default_sound
+        matches = []
+        i = 0
+        while i < len(words):
+            w = words[i]
+            matched_kw = None
 
-            # Regel 1: Exacte woordmatch (bijv. "bro" in ["yo", "bro"] of "kanker" in ["echt", "kanker"])
-            if kw_clean in words:
-                return (kw_clean, sound_to_play)
+            for kw in sorted_kws:
+                kw_clean = kw.strip().lower()
+                if not kw_clean:
+                    continue
 
-            # Regel 2: Voor woorden met 4+ letters (zoals "kanker", "kaas"),
-            # sta samenstellingen of voorvoegsels toe (bijv. "kankerzooi", "kankerhond", "kaasbroodje")
-            if len(kw_clean) >= 4:
-                for w in words:
-                    if w.startswith(kw_clean) or (kw_clean in w and len(w) <= len(kw_clean) + 8):
-                        return (kw_clean, sound_to_play)
-                if kw_clean in compact_text:
-                    return (kw_clean, sound_to_play)
+                kw_tokens = kw_clean.split()
+                kw_len = len(kw_tokens)
 
-            # Regel 3: Bekende ASR fonetische varianten (bijv. Whisper die "konker" of "canker" hoort voor "kanker")
-            if kw_clean == "kanker":
-                for w in words:
-                    if any(var in w for var in ["konker", "canker", "kankur", "konk"]):
-                        return (kw_clean, sound_to_play)
+                # Meerdere woorden
+                if kw_len > 1 and i + kw_len <= len(words):
+                    if words[i:i + kw_len] == kw_tokens:
+                        matched_kw = kw_clean
+                        i += kw_len - 1
+                        break
 
-        return None
+                # Enkel woord match
+                elif kw_len == 1:
+                    # Regel 1: Exacte match
+                    if w == kw_clean:
+                        matched_kw = kw_clean
+                        break
+                    # Regel 2: Samenstellingen (4+ letters)
+                    elif len(kw_clean) >= 4 and (w.startswith(kw_clean) or (kw_clean in w and len(w) <= len(kw_clean) + 8)):
+                        matched_kw = kw_clean
+                        break
+                    # Regel 3: Fonetische varianten voor 'kanker'
+                    elif kw_clean == "kanker" and any(var in w for var in ["konker", "canker", "kankur", "konk"]):
+                        matched_kw = kw_clean
+                        break
+
+            if matched_kw:
+                sound = keywords_dict.get(matched_kw) or default_sound
+                matches.append((matched_kw, sound))
+
+            i += 1
+
+        return matches
 
     def _audio_capture_worker(self, speaker_id: int, q: queue.Queue) -> None:
         """
@@ -357,19 +375,12 @@ class KeywordAudioSink(voice_recv.AudioSink):
             self.last_transcription = f"[{speaker_name}]: {clean_display}"
             logger.info(f"🗣️ [{engine.upper()} gehoord van {speaker_name}]: '{clean_display}'")
 
-            matched = self._check_text_for_keywords(clean_display)
-            if matched:
-                kw, sound = matched
-                now = time.time()
-                cooldown = cfg.get("cooldown_seconds", 1.5)
-
-                vc = self.voice_client
-                is_busy = vc and vc.is_playing()
-
-                if not is_busy and (now - self.last_trigger_time >= cooldown):
-                    self.last_trigger_time = now
+            matches = self._find_all_keywords(clean_display)
+            if matches:
+                self.last_trigger_time = time.time()
+                for kw, sound in matches:
                     self.last_detected_keyword = kw
-                    logger.info(f"🚨 TREFWOORD GEDETECTEERD: '{kw}' door {speaker_name}! Speel: {sound}")
+                    logger.info(f"🚨 TREFWOORD GEDETECTEERD: '{kw}' door {speaker_name}! Gestackt: {sound}")
                     self.on_keyword_detected(speaker_obj, kw, sound, clean_display)
 
     @voice_recv.AudioSink.listener()

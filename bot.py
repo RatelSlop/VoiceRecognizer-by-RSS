@@ -190,8 +190,9 @@ active_sinks: Dict[int, KeywordAudioSink] = {}
 active_text_channels: Dict[int, discord.TextChannel] = {}
 
 
-# Track actieve playback per guild om audio overlapping te voorkomen
-guild_playback_locks: Dict[int, asyncio.Lock] = {}
+# Wachtrij (Queue) per guild voor gestackte trefwoorden en geluiden
+guild_queues: Dict[int, asyncio.Queue] = {}
+guild_tasks: Dict[int, asyncio.Task] = {}
 
 
 def generate_tts_file(text: str, lang: str = "nl") -> Optional[str]:
@@ -290,12 +291,13 @@ def play_sound_in_vc(guild_id: int, sound_file: str) -> bool:
 def on_keyword_detected(user: discord.User, keyword: str, sound_file: str, sentence: str = ""):
     """Callback wanneer een trefwoord gehoord is in een voice channel."""
     asyncio.run_coroutine_threadsafe(
-        _handle_keyword_async(user, keyword, sound_file, sentence),
+        _enqueue_keyword(user, keyword, sound_file, sentence),
         bot.loop
     )
 
 
-async def _handle_keyword_async(user: discord.User, keyword: str, sound_file: str, sentence: str = ""):
+async def _enqueue_keyword(user: discord.User, keyword: str, sound_file: str, sentence: str = ""):
+    """Voegt een trefwoordactie toe aan de wachtrij van de server zodat meerdere trefwoorden stacken."""
     guild = None
     if isinstance(user, discord.Member):
         guild = user.guild
@@ -309,91 +311,138 @@ async def _handle_keyword_async(user: discord.User, keyword: str, sound_file: st
     if not guild or not guild.voice_client or not guild.voice_client.is_connected():
         return
 
-    vc = guild.voice_client
-    guild_lock = guild_playback_locks.setdefault(guild.id, asyncio.Lock())
+    guild_id = guild.id
+    if guild_id not in guild_queues:
+        guild_queues[guild_id] = asyncio.Queue(maxsize=50)
 
-    if guild_lock.locked():
-        logger.debug(f"Audio al bezig in guild {guild.name}, trigger overgeslagen.")
+    q = guild_queues[guild_id]
+    if q.full():
+        logger.warning(f"Wachtrij vol voor {guild.name} (max 50 items), trigger overgeslagen.")
         return
 
-    async with guild_lock:
-        cfg = get_current_config()
-        vol = float(cfg.get("volume", 0.85))
-        tts_enabled = cfg.get("tts_enabled", True)
-        tts_mode = cfg.get("tts_mode", "sound_then_tts")
+    q.put_nowait((user, keyword, sound_file, sentence))
+    logger.info(f"📥 Trefwoord '{keyword}' toegevoegd aan wachtrij voor {guild.name} (Items in wachtrij: {q.qsize()})")
 
-        # Zoek het geluidspad
-        sound_path = None
-        if sound_file:
-            p = os.path.join(SOUNDS_DIR, sound_file)
-            if os.path.exists(p):
-                sound_path = p
-            else:
-                def_p = os.path.join(SOUNDS_DIR, cfg.get("default_sound", "ploep.mp3"))
-                if os.path.exists(def_p):
-                    sound_path = def_p
+    # Start queue worker indien deze nog niet actief is
+    task = guild_tasks.get(guild_id)
+    if task is None or task.done():
+        guild_tasks[guild_id] = asyncio.create_task(_guild_queue_worker(guild_id))
 
-        # Bepaal de tekst die door TTS moet worden opgelezen ("USER zei keyword")
-        spoken_sentence = extract_keyword_sentence(sentence, keyword) if sentence else ""
-        tts_inhoud = cfg.get("tts_inhoud", "keyword")
-        if tts_inhoud == "sentence" and spoken_sentence:
-            tts_text = f"{user.display_name} zei: {spoken_sentence}"
-        else:
-            tts_text = f"{user.display_name} zei {keyword}"
 
-        # Genereer eventueel TTS audiobestand in achtergrondthread
-        tts_file = None
-        if tts_enabled and tts_text:
-            tts_file = await asyncio.to_thread(generate_tts_file, tts_text, "nl")
+async def _guild_queue_worker(guild_id: int):
+    """Verwerkt alle gestackte trefwoorden en geluiden achter elkaar (FIFO) per server."""
+    guild = bot.get_guild(guild_id)
+    if not guild:
+        return
 
-        try:
-            if tts_mode == "only_tts":
-                if tts_file:
-                    await play_audio_file(vc, tts_file, volume=vol)
-                elif sound_path:
-                    await play_audio_file(vc, sound_path, volume=vol)
+    q = guild_queues.get(guild_id)
+    if not q:
+        return
 
-            elif tts_mode == "tts_then_sound":
-                if tts_file:
-                    await play_audio_file(vc, tts_file, volume=vol)
-                    await asyncio.sleep(0.15)
-                if sound_path:
-                    await play_audio_file(vc, sound_path, volume=vol)
+    try:
+        while True:
+            try:
+                # Wacht tot er een item is; stopt na 30s inactiviteit om resources te sparen
+                user, keyword, sound_file, sentence = await asyncio.wait_for(q.get(), timeout=30.0)
+            except asyncio.TimeoutError:
+                break
 
-            else:  # "sound_then_tts" (standaard)
-                if sound_path:
-                    await play_audio_file(vc, sound_path, volume=vol)
-                    await asyncio.sleep(0.15)
-                if tts_file:
-                    await play_audio_file(vc, tts_file, volume=vol)
+            try:
+                vc = guild.voice_client
+                if not vc or not vc.is_connected():
+                    continue
 
-        finally:
-            if tts_file and os.path.exists(tts_file):
-                try:
-                    os.remove(tts_file)
-                except Exception:
-                    pass
+                cfg = get_current_config()
+                vol = float(cfg.get("volume", 0.85))
+                tts_enabled = cfg.get("tts_enabled", True)
+                tts_mode = cfg.get("tts_mode", "tts_then_sound")
 
-        # Notificatie sturen in Discord chat
-        if cfg.get("notify_in_chat", True):
-            text_channel = active_text_channels.get(guild.id)
-            if text_channel:
-                embed = discord.Embed(
-                    title="🚨 Trefwoord Gedetecteerd!",
-                    description=f"**{user.display_name}** zei **'{keyword}'**!",
-                    color=discord.Color.red()
-                )
-                if spoken_sentence:
-                    embed.add_field(name="💬 Gehoorde Zin", value=f"*{spoken_sentence}*", inline=False)
+                # Zoek het geluidspad
+                sound_path = None
                 if sound_file:
-                    embed.add_field(name="🔊 Geluid", value=f"`{sound_file}`", inline=True)
+                    p = os.path.join(SOUNDS_DIR, sound_file)
+                    if os.path.exists(p):
+                        sound_path = p
+                    else:
+                        def_p = os.path.join(SOUNDS_DIR, cfg.get("default_sound", "ploep.mp3"))
+                        if os.path.exists(def_p):
+                            sound_path = def_p
+
+                # Bepaal de tekst die door TTS moet worden opgelezen ("USER zei keyword")
+                spoken_sentence = extract_keyword_sentence(sentence, keyword) if sentence else ""
+                tts_inhoud = cfg.get("tts_inhoud", "keyword")
+                if tts_inhoud == "sentence" and spoken_sentence:
+                    tts_text = f"{user.display_name} zei: {spoken_sentence}"
+                else:
+                    tts_text = f"{user.display_name} zei {keyword}"
+
+                # Genereer eventueel TTS audiobestand in achtergrondthread
+                tts_file = None
                 if tts_enabled and tts_text:
-                    embed.add_field(name="🗣️ TTS Opgelesen", value=f"*{tts_text}*", inline=True)
-                embed.set_footer(text="Keyword Voice Bot")
+                    tts_file = await asyncio.to_thread(generate_tts_file, tts_text, "nl")
+
                 try:
-                    await text_channel.send(embed=embed)
-                except Exception:
-                    pass
+                    if tts_mode == "only_tts":
+                        if tts_file:
+                            await play_audio_file(vc, tts_file, volume=vol)
+                        elif sound_path:
+                            await play_audio_file(vc, sound_path, volume=vol)
+
+                    elif tts_mode == "tts_then_sound":
+                        if tts_file:
+                            await play_audio_file(vc, tts_file, volume=vol)
+                            await asyncio.sleep(0.1)
+                        if sound_path:
+                            await play_audio_file(vc, sound_path, volume=vol)
+
+                    else:  # "sound_then_tts" (standaard)
+                        if sound_path:
+                            await play_audio_file(vc, sound_path, volume=vol)
+                            await asyncio.sleep(0.1)
+                        if tts_file:
+                            await play_audio_file(vc, tts_file, volume=vol)
+
+                finally:
+                    if tts_file and os.path.exists(tts_file):
+                        try:
+                            os.remove(tts_file)
+                        except Exception:
+                            pass
+
+                # Notificatie sturen in Discord chat
+                if cfg.get("notify_in_chat", True):
+                    text_channel = active_text_channels.get(guild.id)
+                    if text_channel:
+                        embed = discord.Embed(
+                            title="🚨 Trefwoord Gedetecteerd!",
+                            description=f"**{user.display_name}** zei **'{keyword}'**!",
+                            color=discord.Color.red()
+                        )
+                        if spoken_sentence:
+                            embed.add_field(name="💬 Gehoorde Zin", value=f"*{spoken_sentence}*", inline=False)
+                        if sound_file:
+                            embed.add_field(name="🔊 Geluid", value=f"`{sound_file}`", inline=True)
+                        if tts_enabled and tts_text:
+                            embed.add_field(name="🗣️ TTS Opgelesen", value=f"*{tts_text}*", inline=True)
+                        if q.qsize() > 0:
+                            embed.set_footer(text=f"Keyword Voice Bot • Nog {q.qsize()} gestackt in wachtrij")
+                        else:
+                            embed.set_footer(text="Keyword Voice Bot")
+                        try:
+                            await text_channel.send(embed=embed)
+                        except Exception:
+                            pass
+
+                # Korte pauze tussen gestackte items
+                await asyncio.sleep(0.15)
+
+            except Exception as e:
+                logger.error(f"Fout in queue worker voor {guild.name}: {e}")
+            finally:
+                q.task_done()
+
+    finally:
+        guild_tasks.pop(guild_id, None)
 
 
 # -------------------------------------------------------------
@@ -512,6 +561,11 @@ async def cmd_leave(interaction: discord.Interaction):
     if sink:
         sink.cleanup()
 
+    guild_queues.pop(guild_id, None)
+    task = guild_tasks.pop(guild_id, None)
+    if task and not task.done():
+        task.cancel()
+
     if hasattr(vc, "stop_listening") and vc.is_listening():
         vc.stop_listening()
 
@@ -552,6 +606,9 @@ async def cmd_status(interaction: discord.Interaction):
     }
     tts_display = f"🟢 Aan ({mode_names.get(tts_mode_str, tts_mode_str)})" if tts_on else "🔴 Uit"
     embed.add_field(name="TTS Oplezen", value=tts_display, inline=True)
+    q = guild_queues.get(interaction.guild_id)
+    q_len = q.qsize() if q else 0
+    embed.add_field(name="Wachtrij (Stack)", value=f"`{q_len} in wachtrij`" if q_len > 0 else "Leeg", inline=True)
 
     # Keywords lijst
     kws = config.get("keywords", {})
@@ -966,6 +1023,10 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         sink = active_sinks.pop(guild_id, None)
         if sink:
             sink.cleanup()
+        guild_queues.pop(guild_id, None)
+        task = guild_tasks.pop(guild_id, None)
+        if task and not task.done():
+            task.cancel()
         active_text_channels.pop(guild_id, None)
         logger.info(f"Bot ontkoppeld van spraakkanaal in {member.guild.name}.")
 
